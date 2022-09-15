@@ -1,0 +1,243 @@
+---
+title: "Advanced Stat Project"
+output:
+  pdf_document: default
+  html_notebook: default
+  html_document:
+    df_print: paged
+Author: "Pauline Salis- A21"
+---
+
+
+https://data.world/exercises/linear-regression-exercise-1/workspace/file?filename=cancer_reg.csv
+
+```{r}
+library(readxl)
+library(fpp)
+library(ggplot2) 
+library(forecast)
+library(xts)
+library(urca)
+library(vars)
+library(bestglm)
+library(missMDA)
+library("GGally")  
+```
+
+# I. Preprocessing data
+
+## a. Preprocessing data (categorical and missing values)
+
+### Download data
+```{r}
+data1 <- read.csv('cancer_reg.csv')
+```
+
+
+### Display the structure of the data frame
+```{r}
+str(data1) 
+```
+There are 33 variables among which 2 are not numeric or integers. We delete those two variables.
+
+
+### We delete the variable geography and binnedinc
+
+```{r}
+data2 <- subset(as.data.frame(data1), select = -c(geography, binnedinc))
+str(data2)
+```
+
+### Handle Missing data
+First, we determine how many missing data are present for each variable
+```{r}
+colSums(is.na(data2))
+```
+We can observe that there are a lot of missing values mostly in pctsomecol18_24 and pctprivatecoveragealone. Because the number of missing values is too big, let's use the missMDA package to replace the data.
+
+```{r}
+res.impute = imputePCA(data2)
+data2_imputePCA = as.data.frame(res.impute$completeOb)
+```
+
+Quick comparison of histogramm between data after imputePCA (data2_imputePCA) and the one after removing all the observation having NA (dat)
+```{r}
+data2_MissingValueSup <- na.omit(data2)
+
+par(mfrow=c(2,2))
+hist(data2_imputePCA$pctsomecol18_24, freq = FALSE)
+hist(data2_MissingValueSup$pctsomecol18_24, freq = FALSE)
+hist(data2_imputePCA$pctprivatecoveragealone, freq = FALSE)
+hist(data2_MissingValueSup$pctprivatecoveragealone, freq = FALSE)
+```
+From the histogramm, the estimation using imputePCA is quite good for pctprivatecoveragealone. It is not very good for pctsomecol18_24, however, this was expected as the number of missing value for this variable is very high.
+
+
+Conclusion: 
+We are going now to use data2_imputePCA to perform the tests.
+
+### Plot the data
+
+```{r}
+hist(data2_imputePCA$target_deathrate, freq = FALSE)
+```
+
+###   b. Creating Test and Train dataset (respectively 1/3 and 2/3)
+
+```{r}
+random_index <- sample(nrow(data2_imputePCA), size = nrow(data2_imputePCA) * 0.7)
+data2_train <- data2_imputePCA[random_index, ]
+data2_test <- data2_imputePCA[-random_index, ]
+```
+
+# II. On this dataset, perform an ordinary least square model to explain the target_deathrate variable thanks to the numerical ones.
+
+```{r}
+LM_Cancer=lm(data2_train$target_deathrate ~. ,data=data2_train)
+summary(LM_Cancer)
+```
+
+```{r}
+P_LM = predict(LM_Cancer, newdata = data2_test)
+summary(P_LM)
+```
+
+
+# III. Then perform variable selection by using a step by step method at first and a penalized one then.
+
+##    a. Variable selection by using Step by step method
+
+### Backward step by step method
+```{r}
+LM_Back <- lm(data2_train$target_deathrate ~. ,data=data2_train) 
+step(LM_Back, direction = "backward")
+```
+
+```{r}
+P_LM_back = predict(LM_Back, newdata = data2_test)
+summary(P_LM_back)
+```
+
+
+### Forward step by step method
+```{r}
+ML_For <- lm(data2_train$target_deathrate ~ 1, data=data2_train) 
+step(ML_For, direction = "forward", scope = formula(LM_Back))
+```
+```{r}
+P_LM_for = predict(ML_For, newdata = data2_test)
+summary(P_LM_for)
+```
+
+
+##    b. Variable selection by using penalized method: LASSO 
+
+```{r}
+# lasso
+x_lasso=as.matrix(data2_train[,-3])
+y_lasso=as.matrix(data2_train[,3])
+```
+
+
+```{r}
+library(glmnet)
+tmp_lasso=cv.glmnet(x_lasso,y_lasso, alpha=1)
+plot(tmp_lasso)
+```
+The above plot shows the cross-validation error (the mean squared error computed using the CV approach) with different values of  λ in the ln scale. 
+
+
+```{r}
+modele_lasso=glmnet(x_lasso,y_lasso,alpha=1,lambda=tmp_lasso$lambda.1se)
+modele_lasso$beta
+```
+So here, we have 13 variables to select for our model
+
+```{r}
+lm_lasso =lm(formula = data2_train$target_deathrate ~ incidencerate + 
+          povertypercent + medianagefemale + pcths18_24 + pcths25_over +
+          pctbachdeg25_over + pctemployed16_over + pctunemployed16_over + pctprivatecoverage +
+          pctpubliccoveragealone + pctotherrace + pctmarriedhouseholds + 
+          birthrate, data = data2_train)
+```
+
+Now, we have to estimate 1) a lasso model preduction and 2) an OLS model on the selected feature
+```{r}
+P_Lasso=predict(modele_lasso, newx = as.matrix(data2_test[,-3]), s = tmp_lasso$lambda.1se)
+P_LM_Lasso=predict(lm_lasso, newdata = data2_test)
+```
+
+# IV. Perform also a CART algorithm, a model issue by random forest.
+
+```{r}
+# CART
+library(rpart)
+library(rpart.plot)
+
+cart_model=rpart(data2_train$target_deathrate~.,data=data2_train)
+rpart.plot(cart_model)
+P_CART=predict(cart_model, newdata = data2_test)
+
+```
+
+```{r}
+# Random Forest
+library(randomForest)
+RF_model=randomForest(data2_train$target_deathrate~.,data=data2_train)
+varImpPlot(RF_model)
+P_RF=predict(RF_model, newdata = data2_test)
+```
+
+# V. Identify thanks to VSURF the subset of interested variables and use this subset to construct a CART tree. What is the best model? You should explain the VSURF procedure.
+
+##    a. VSURF: identify subset of interested variables 
+```{r}
+# VSURF
+library(VSURF)
+tmp_VSURF=VSURF(x_lasso, as.vector(y_lasso))
+print(colnames(x_lasso)[tmp_VSURF$varselect.pred])
+```
+
+##    b. Construct a CART TREE
+
+Pick the CART model with VSURF selected variables
+
+```{r}
+VSURF_model=rpart(data2_train$target_deathrate ~ avganncount + incidencerate + 
+          povertypercent + medianagemale + pcths18_24 + pcths25_over +
+          pctbachdeg25_over + pctunemployed16_over + pctprivatecoverage +
+          pctotherrace + pctmarriedhouseholds + birthrate,data=data2_train)
+p_VSURF=predict(VSURF_model, newdata = data2_test)
+```
+
+
+
+##    c. What is the best model: Prediction
+```{r}
+# Prediction plot
+par(mfrow=c(3, 3))
+plot(P_LM,data2_test$target_deathrate) # ordinary least square model 
+plot(P_LM_back,data2_test$target_deathrate)# Ordinary least square model (OLS) -Backward step by step method
+plot(P_LM_for,data2_test$target_deathrate)# Ordinary least square model -Forward step by step method
+plot(P_LM_Lasso,data2_test$target_deathrate) # Ordinary least square model -penalized method: LASSO
+plot(P_Lasso,data2_test$target_deathrate) # LASSO
+plot(P_CART,data2_test$target_deathrate) # Cart
+plot(P_RF,data2_test$target_deathrate) # random forest
+plot(p_VSURF,data2_test$target_deathrate) # VSURF
+```
+
+
+```{r}
+# Who is the best model : we have to compute MSE by CV or on a test set
+cat('LM:',sqrt(mean((P_LM - data2_test$target_deathrate)^2)),'\n') # ordinary least square model 
+cat('step backward:',sqrt(mean((P_LM_back - data2_test$target_deathrate)^2)),'\n') # Ordinary least square model (OLS) -Backward step by step method
+cat('step forward:',sqrt(mean((P_LM_for - data2_test$target_deathrate)^2)),'\n')# Ordinary least square model -Forward step by step method
+cat('LM on LASSO selected features:',sqrt(mean((P_LM_Lasso- data2_test$target_deathrate)^2)),'\n')  # Ordinary least square model -penalized method: LASSO
+cat('LASSO:',sqrt(mean((P_Lasso - data2_test$target_deathrate)^2)),'\n') # LASSO
+cat('CART:',sqrt(mean((P_CART - data2_test$target_deathrate)^2)),'\n')
+cat('RandomForest:',sqrt(mean((P_RF - data2_test$target_deathrate)^2)),'\n')
+cat('CART + VSURF:',sqrt(mean((p_VSURF - data2_test$target_deathrate)^2)),'\n')
+```
+
+# CONCLUSION: The best model corresponds to the lowest MSE, i.e. RandomForest (18.15) which is quite closed to the ordinary least square model prediction and backward step least square model prediction (closed to 18.8).
+
